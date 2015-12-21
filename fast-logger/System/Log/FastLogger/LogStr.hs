@@ -50,10 +50,13 @@ fromBuilder = BS.concat . BL.toChunks . B.toLazyByteString
 ----------------------------------------------------------------
 
 -- | Log message builder. Use ('<>') to append two LogStr in O(1).
-data LogStr = LogStr !Int Builder
+data LogStr = LogStr !Int !Builder
+
+emp :: Builder
+emp = toBuilder BS.empty
 
 instance Monoid LogStr where
-    mempty = LogStr 0 (toBuilder BS.empty)
+    mempty = LogStr 0 emp
     LogStr s1 b1 `mappend` LogStr s2 b2 = LogStr (s1 + s2) (b1 <> b2)
 
 instance IsString LogStr where
