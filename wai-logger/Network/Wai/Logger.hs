@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- | Apache style logger for WAI applications.
 --
 -- An example:
@@ -49,7 +51,6 @@ module Network.Wai.Logger (
   , showSockAddr
   ) where
 
-import Control.Applicative ((<$>))
 import Control.AutoUpdate (mkAutoUpdate, defaultUpdateSettings, updateAction)
 import Control.Concurrent (MVar, newMVar, tryTakeMVar, putMVar)
 import Control.Exception (handle, SomeException(..), bracket)
@@ -87,13 +88,18 @@ withStdoutLogger app = bracket setup teardown $ \(aplogger, _) ->
 type ApacheLogger = Request -> Status -> Maybe Integer -> IO ()
 
 data ApacheLoggerActions = ApacheLoggerActions {
+    -- | Essentially, this is equivalent to @\\req st mlen -> apacheLog req st mlen >>= pushLog@.
     apacheLogger :: ApacheLogger
-    -- | This is obsoleted. Rotation is done on-demand.
-    --   So, this is now an empty action.
-  , logRotator :: IO ()
+    -- | Generating Apache log format. Use this if you don't want leak 'Request'.
+  , apacheLog :: Request -> Status -> Maybe Integer -> IO LogStr
+    -- | Pushing the apache log.
+  , pushLog :: LogStr -> IO ()
     -- | Removing resources relating Apache logger.
     --   E.g. flushing and deallocating internal buffers.
   , logRemover :: IO ()
+    -- | This is obsoleted. Rotation is done on-demand.
+    --   So, this is now an empty action.
+  , logRotator :: IO ()
   }
 
 -- | Logger Type.
@@ -123,6 +129,8 @@ initLogger ipsrc (LogCallback cb flush) dateget = callbackLoggerInit ipsrc cb fl
 noLoggerInit :: IO ApacheLoggerActions
 noLoggerInit = return ApacheLoggerActions {
     apacheLogger = noLogger
+  , apacheLog = \_ _ _ -> return mempty
+  , pushLog = \_ -> return ()
   , logRotator = noRotator
   , logRemover = noRemover
   }
@@ -135,13 +143,16 @@ stdoutLoggerInit :: IPAddrSource -> BufSize -> DateCacheGetter
                  -> IO ApacheLoggerActions
 stdoutLoggerInit ipsrc size dateget = do
     lgrset <- newStdoutLoggerSet size
-    let logger = apache (pushLogStr lgrset) ipsrc dateget
+    let formatter = apache ipsrc dateget
+        push = pushLogStr lgrset
         noRotator = return ()
         remover = rmLoggerSet lgrset
     return ApacheLoggerActions {
-        apacheLogger = logger
-      , logRotator = noRotator
-      , logRemover = remover
+        apacheLogger = \req st mlen -> formatter req st mlen >>= push
+      , apacheLog    = formatter
+      , pushLog      = push
+      , logRotator   = noRotator
+      , logRemover   = remover
       }
 
 fileLoggerInit :: IPAddrSource -> FileLogSpec -> BufSize -> DateCacheGetter
@@ -150,16 +161,19 @@ fileLoggerInit ipsrc spec size dateget = do
     lgrset <- newFileLoggerSet size $ log_file spec
     ref <- newIORef (0 :: Int)
     mvar <- newMVar ()
-    let logger a b c = do
+    let formatter = apache ipsrc dateget
+        push logstr = do
             cnt <- decrease ref
-            apache (pushLogStr lgrset) ipsrc dateget a b c
+            pushLogStr lgrset logstr
             when (cnt <= 0) $ tryRotate lgrset spec ref mvar
         noRotator = return ()
         remover = rmLoggerSet lgrset
     return ApacheLoggerActions {
-        apacheLogger = logger
-      , logRotator = noRotator
-      , logRemover = remover
+        apacheLogger = \req st mlen -> formatter req st mlen >>= push
+      , apacheLog    = formatter
+      , pushLog      = push
+      , logRotator   = noRotator
+      , logRemover   = remover
       }
 
 decrease :: IORef Int -> IO Int
@@ -171,21 +185,24 @@ callbackLoggerInit ipsrc cb flush dateget = do
     flush' <- mkAutoUpdate defaultUpdateSettings
         { updateAction = flush
         }
-    let logger a b c = apache cb ipsrc dateget a b c >> flush'
+    let formatter = apache ipsrc dateget
+        push = \str -> cb str >> flush'
         noRotator = return ()
         remover = return ()
     return ApacheLoggerActions {
-        apacheLogger = logger
-      , logRotator = noRotator
-      , logRemover = remover
+        apacheLogger = \req st mlen -> formatter req st mlen >>= push
+      , apacheLog    = formatter
+      , pushLog      = push
+      , logRotator   = noRotator
+      , logRemover   = remover
       }
 
 ----------------------------------------------------------------
 
-apache :: (LogStr -> IO ()) -> IPAddrSource -> DateCacheGetter -> ApacheLogger
-apache cb ipsrc dateget req st mlen = do
-    zdata <- dateget
-    cb (apacheLogStr ipsrc zdata req st mlen)
+apache :: IPAddrSource -> DateCacheGetter -> Request -> Status -> Maybe Integer -> IO LogStr
+apache !ipsrc !dateget !req !st !mlen = do
+    !zdata <- dateget
+    return $! apacheLogStr ipsrc zdata req st mlen
 
 ----------------------------------------------------------------
 

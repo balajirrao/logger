@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings, CPP #-}
+{-# LANGUAGE BangPatterns #-}
 
 module Network.Wai.Logger.Apache (
     IPAddrSource(..)
@@ -40,26 +41,37 @@ data IPAddrSource =
 
 -- | Apache style log format.
 apacheLogStr :: IPAddrSource -> ZonedDate -> Request -> Status -> Maybe Integer -> LogStr
-apacheLogStr ipsrc tmstr req status msize =
-      toLogStr (getSourceIP ipsrc req)
+apacheLogStr !ipsrc !tmstr !req !status !msize =
+      toLogStr ip
   <> " - - ["
   <> toLogStr tmstr
   <> "] \""
-  <> toLogStr (requestMethod req)
+  <> toLogStr method
   <> " "
-  <> toLogStr (rawPathInfo req)
+  <> toLogStr path
   <> " "
-  <> toLogStr (show (httpVersion req))
+  <> toLogStr httpVer
   <> "\" "
-  <> toLogStr (show (statusCode status))
+  <> toLogStr st
   <> " "
-  <> toLogStr (maybe "-" show msize)
+  <> toLogStr size
   <> " \""
-  <> toLogStr (lookupRequestField' "referer" req)
+  <> toLogStr referer
   <> "\" \""
-  <> toLogStr (lookupRequestField' "user-agent" req)
+  <> toLogStr agent
   <> "\"\n"
   where
+    -- to release req for quick GC
+    !ip = getSourceIP ipsrc req
+    !method = requestMethod req
+    !path = rawPathInfo req
+    !httpVer0 = httpVersion req
+    !httpVer = show httpVer0
+    !st0 = statusCode status
+    !st = show st0
+    !size = maybe "-" show msize
+    !referer = lookupRequestField' "referer" req
+    !agent = lookupRequestField' "user-agent" req
 #if !MIN_VERSION_base(4,5,0)
     (<>) = mappend
 #endif
